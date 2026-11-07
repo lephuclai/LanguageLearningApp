@@ -19,8 +19,12 @@ import {
   BookOpen,
   Edit3,
   CheckCircle2,
+  Loader2,
+  AlertCircle,
+  Search,
 } from "lucide-react";
 import { formatRelativeDate } from "@/lib/utils";
+import { recordStudyActivity } from "@/lib/auth";
 
 export default function DeckDetailPage() {
   const params = useParams();
@@ -39,6 +43,67 @@ export default function DeckDetailPage() {
   const [newPartOfSpeech, setNewPartOfSpeech] = useState("noun");
   const [newDef, setNewDef] = useState("");
   const [newExample, setNewExample] = useState("");
+  const [newAudioUrl, setNewAudioUrl] = useState("");
+  const [availableExamples, setAvailableExamples] = useState<string[]>([]);
+  const [isLookingUp, setIsLookingUp] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+
+  const handleLookupCambridge = async () => {
+    if (!newTerm.trim()) return;
+    try {
+      setIsLookingUp(true);
+      setLookupError(null);
+      setAvailableExamples([]);
+      const res = await fetch(`/api/dictionary/lookup?word=${encodeURIComponent(newTerm.trim())}`);
+      const data = await res.json();
+
+      if (!res.ok || !data.success || !data.data) {
+        setLookupError(data.message || "Không tìm thấy từ trên từ điển Cambridge.");
+        return;
+      }
+
+      const wordEntry = data.data;
+      if (wordEntry.phoneticUk || wordEntry.phoneticUs) {
+        setNewPhonetic(wordEntry.phoneticUk || wordEntry.phoneticUs);
+      }
+      if (wordEntry.partOfSpeech) {
+        setNewPartOfSpeech(wordEntry.partOfSpeech);
+      }
+      if (wordEntry.audioUsUrl || wordEntry.audioUkUrl) {
+        setNewAudioUrl(wordEntry.audioUsUrl || wordEntry.audioUkUrl);
+      }
+
+      const firstDef = wordEntry.definitions?.[0];
+      if (firstDef) {
+        setNewDef(firstDef.vietnameseTranslation || firstDef.englishDef);
+      }
+
+      // Automatically populate example sentence from definition or multi-tier providers
+      const allEx: string[] =
+        wordEntry.examples && wordEntry.examples.length > 0
+          ? wordEntry.examples
+          : (wordEntry.definitions?.flatMap((d: any) => d.examples || []) || []);
+
+      const primaryEx = wordEntry.example || firstDef?.examples?.[0] || allEx[0];
+      if (primaryEx) {
+        setNewExample(primaryEx);
+      }
+      if (allEx.length > 0) {
+        setAvailableExamples(allEx);
+      }
+
+      recordStudyActivity({
+        type: "cambridge_lookup",
+        title: `Tra từ điển Cambridge: ${wordEntry.term}`,
+        description: `Tra cứu phát âm và câu ví dụ cho '${wordEntry.term}'`,
+        metadata: { term: wordEntry.term },
+      });
+    } catch {
+      setLookupError("Lỗi kết nối tới dịch vụ tra từ điển Cambridge.");
+    } finally {
+      setIsLookingUp(false);
+    }
+  };
 
   useEffect(() => {
     const allDecks = getLocalDecks();
@@ -63,6 +128,7 @@ export default function DeckDetailPage() {
       partOfSpeech: newPartOfSpeech,
       definition: newDef.trim(),
       exampleSentence: newExample.trim(),
+      audioUrl: newAudioUrl.trim() || undefined,
       status: "new",
       repetition: 0,
       easinessFactor: 2.5,
@@ -75,10 +141,20 @@ export default function DeckDetailPage() {
     saveLocalCards(updated);
     setCards(updated.filter((c) => c.deckId === deckId));
 
+    recordStudyActivity({
+      type: "card_created",
+      title: `Thêm từ mới: ${newCard.term}`,
+      description: `Đã lưu từ '${newCard.term}' (${newCard.partOfSpeech}) vào kho từ vựng cá nhân`,
+      metadata: { term: newCard.term, deckId },
+    });
+
     setNewTerm("");
     setNewPhonetic("");
     setNewDef("");
     setNewExample("");
+    setNewAudioUrl("");
+    setAvailableExamples([]);
+    setLookupError(null);
     setShowAddModal(false);
   };
 
@@ -264,7 +340,7 @@ export default function DeckDetailPage() {
 
                   {card.exampleSentence && (
                     <p className="text-xs text-slate-500 italic pl-8">
-                      "{card.exampleSentence}"
+                      &ldquo;{card.exampleSentence}&rdquo;
                     </p>
                   )}
                 </div>
@@ -297,7 +373,28 @@ export default function DeckDetailPage() {
             <form onSubmit={handleAddManualCard} className="mt-4 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs font-bold uppercase text-slate-500">Từ vựng (Term):</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold uppercase text-slate-500">Từ vựng (Term):</label>
+                    <button
+                      type="button"
+                      onClick={handleLookupCambridge}
+                      disabled={!newTerm.trim() || isLookingUp}
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-brand-600 hover:text-brand-700 bg-brand-50 hover:bg-brand-100 px-2 py-0.5 rounded-lg dark:bg-brand-950 dark:text-brand-300 disabled:opacity-50 transition-colors"
+                      title="Tự động tra phiên âm, từ loại, nghĩa tiếng Việt, câu ví dụ và audio phát âm chuẩn Cambridge"
+                    >
+                      {isLookingUp ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <span>Đang tra...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="h-3 w-3" />
+                          <span>⚡ Tra Cambridge</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                   <input
                     type="text"
                     required
@@ -318,6 +415,33 @@ export default function DeckDetailPage() {
                   />
                 </div>
               </div>
+
+              {lookupError && (
+                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-amber-50 text-amber-800 text-xs border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{lookupError}</span>
+                </div>
+              )}
+
+              {newAudioUrl && (
+                <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900">
+                  <span className="flex items-center gap-1.5">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>Đã lấy phát âm Cambridge MP3</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const audio = new Audio(newAudioUrl);
+                      audio.play();
+                    }}
+                    className="flex items-center gap-1 text-[11px] font-bold underline"
+                  >
+                    <Volume2 className="h-3 w-3" />
+                    <span>Nghe thử</span>
+                  </button>
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-bold uppercase text-slate-500">Nghĩa tiếng Việt:</label>
@@ -340,12 +464,36 @@ export default function DeckDetailPage() {
                   placeholder="We need to adopt a pragmatic approach to meet the deadline."
                   className="mt-1 w-full rounded-xl border border-slate-200 px-3.5 py-2 text-sm focus:border-brand-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800"
                 />
+                {availableExamples.length > 1 && (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-[11px] font-semibold text-slate-500">Gợi ý ví dụ khác (bấm để chọn):</p>
+                    <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-1">
+                      {availableExamples.slice(0, 4).map((ex, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setNewExample(ex)}
+                          className={`text-left text-xs px-2.5 py-1.5 rounded-lg border transition-colors ${
+                            newExample === ex
+                              ? "bg-brand-50 border-brand-300 text-brand-700 dark:bg-brand-950/50 dark:border-brand-700 dark:text-brand-300 font-medium"
+                              : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300"
+                          }`}
+                        >
+                          &ldquo;{ex}&rdquo;
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setShowAddModal(false)}
+                  onClick={() => {
+                    setAvailableExamples([]);
+                    setShowAddModal(false);
+                  }}
                   className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 dark:text-slate-400"
                 >
                   Hủy
